@@ -1,0 +1,292 @@
+---
+title: Partial Least Squares Discriminant Analysis of Acute Myeloid Leukemia
+  and Acute Lymphoblastic Leukemia Phenotypes Using DNA Expression Microarray
+author: "Jonathan Bryan"
+date: "April 30, 2018"
+output:
+  pdf_document:
+    fig_height: 5
+    fig_width: 8
+  geometry: left=1.5in, right=1.5in
+  word_document: default
+  fontsize: 10pt
+---
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#knitr::opts_chunk$set(fig.width=8, fig.height=5) 
+#load libraries and data
+library(pls)
+library(mice)
+library(MASS)
+
+#load data
+train_gene = read.csv("data_set_ALL_AML_train.csv", stringsAsFactors = FALSE, quote = "")
+test_gene =  read.csv("data_set_ALL_AML_independent.csv", stringsAsFactors = FALSE, quote = "")
+phenotype =  read.csv("actual.csv", stringsAsFactors = FALSE)
+
+#Transform response data to binary
+phenotype[phenotype$cancer == "ALL",]$cancer = 0
+phenotype[phenotype$cancer == "AML",]$cancer = 1
+
+#Add responses to data
+train_pheno = phenotype[1:38,]
+test_pheno = phenotype[39:72,]
+
+#Remove Gene Description
+train_gene = train_gene[,-1]
+test_gene = test_gene[,-1]
+
+#Remove call columns
+train_gene = train_gene[,-seq(3,77,2)]
+test_gene = test_gene[,-seq(3,69,2)]
+
+#Transpose gene matricies
+train_gene_t = data.frame(t(train_gene[-1]))
+colnames(train_gene_t) = train_gene[, 1]
+test_gene_t = data.frame(t(test_gene[-1]))
+colnames(test_gene_t) = test_gene[, 1]
+
+train_gene = train_gene[,-1]
+test_gene = test_gene[,-1]
+
+#Modify gene expression patient ID to numeric
+rownames(train_gene_t) = as.numeric(gsub("X","",rownames(train_gene_t)))
+rownames(test_gene_t) = as.numeric(gsub("X","",rownames(test_gene_t)))
+
+#Merge phenotypes with gene expression
+train_full = merge(train_gene_t,train_pheno, by ="row.names", all.x=TRUE)
+test_full = merge(test_gene_t,test_pheno, by ="row.names", all.x = TRUE)
+colnames(train_full)[ncol(train_full)] = "phenotype"
+colnames(test_full)[ncol(test_full)] = "phenotype"
+
+#Remove patient id
+train_full = train_full[,-(ncol(train_full) - 1)]
+test_full = test_full[,-(ncol(test_full) - 1)]
+
+#Remove predictors with all NA's
+train_full = train_full[,colSums(is.na(train_full))<nrow(train_full)]
+test_full = test_full[,colSums(is.na(test_full))<nrow(test_full)]
+
+#Impute missing data
+train_full = mice(train_full, m=5, maxit = 50, method = 'pmm', seed = 500, print=FALSE)
+train_full = complete(train_full,2)
+test_full = mice(test_full, m=5, maxit = 50, method = 'pmm', seed = 500, print=FALSE)
+test_full = complete(test_full,2)
+
+#Create data structure for PLS
+train_df = data.frame(SampN=c(1:nrow(train_full[,-c(1,ncol(train_full))])))
+train_df$X = data.matrix(train_full[,-c(1,ncol(train_full))])
+train_df$phenotype = as.matrix(as.numeric(train_full[,ncol(train_full)]))
+
+test_df = data.frame(SampN=c(1:nrow(test_full[,-c(1,ncol(test_full))])))
+test_df$X = data.matrix(test_full[,-c(1,ncol(test_full))])
+test_df$phenotype = as.matrix(as.numeric(test_full[,ncol(test_full)]))
+
+# Predict CPLS scores for training data
+gene.cpls = cppls(phenotype ~ X, data = train_df, validation = "CV") #run model without Row.names column
+```
+
+## Abstract
+Gene-phenotype association studies using high-dimensional DNA microarray present a classical problem of insufficient degrees of freedom to estimate a regression model using classical approaches such as ordinary least squares. We use a partial least squares discriminant analysis (PLS-DA) method to first find a lower dimensional representation of the gene expression data and then regress responses on the lower dimensional component predictors to perform linear discriminant analysis for classification. We can conveniently map our lower dimensional predictors back to the original gene expression data to get estimated coefficients for individual genes. Data from Golub et al. "Molecular Classification of Cancer: Class Discovery and Class Prediction by Gene Expression Monitoring" was used to perform PLS-DA to classify 73 cases of either acute lymphoblastic leukemia (ALL) or acute myeloid leukemia (AML) on 7129 gene expression covariates.  When using the components of the PLS models as predictors in the LDA model, we achieve 100 accuracy with only two components for the train set and three components for the test set which suggested a more parsimonious solution. Using the reverse mapping method, we identified the top five genes associated with ALL and AML. "M19507_at" encodes for myeloperoxidase had the highest coefficient associated with ALL while gene "D49824_s_at" encodes for a serotype of class 1 major histocompatibility complex (MHC) molecules and had the largest association with AML.
+
+##Introduction
+Classification models with linear and additive predictors are ill-posed when the number of predictors in the model is greater than the number of samples. This problem has infinitely many solutions unless constraints are made to the objective function. Alternative regression approaches such as principal component and partial least squares regression have been developed that find a lower dimensional space to which the response is regressed. This paper reviews both PCR and penalized classification approaches before explaining the partial least squares discriminant analysis approach used.
+
+### Principal components classification 
+The approach of principal components regression (PCR) is to factor the design matrix into a pre-specified or cross-validated number of lower dimensional components used to model the response.[^1] These lower dimensional components can then be used as predictors in a classifier. The principal component scores and loadings can also be transformed back into the original predictors to estimate the regression coefficients of the full model. The model is shown below, where $X_{n \times p}$ is a design matrix, $W_{a \times p}$ is a loading matrix, $T_{n \times a}$ is a score matrix, $\beta_{1 \times p}$ is a vector of coefficients, $y_{n \times 1}$ is a vector of responses, $\epsilon$ is the error term, $g()$ is a link function and $L$ is an exponential likelihood function. 
+
+$$
+\begin{aligned}
+T &= XW \; \text{(PCR step)}\\
+g(E[y]) &= T\beta + \epsilon \; \text{(Linear classifier)} \\
+arg \; \underset{\beta}{max}&\; L(\beta; y, T) \; \text{(MLE)}
+\end{aligned}
+$$
+
+A key limitation of  PCR is the loss of information between the response variable and the newly projected subspace of the predictors as the dimensional reduction takes place independently of the response variation. This limits the predictive ability of the PCR model. 
+
+### Penalized classification
+Another popular approach is LASSO regularization, which uses an L1 penalty to coerce parameter estimates to zero, inducing sparsity on the model.[^2] However, when $p>n$, LASSO classifiers can select a maximum of n predictors, as well as selecting only one covariate from a set of highly correlated predictors. In addition, if the design matrix contains discrete or discontinuous variables then LASSO classifier may lack a unique solution, requiring methods to assess predictor-inclusion uncertainty.[^3] Another approach, the elastic net penalty overcomes the situations when the LASSO optimization is not strictly convex by combining the L1 and L2 (Ridge regression) regularizers to enforce strict convexity.[^4] The elastic net has the benefit of producing a unique solution, inducing shrinkage, and enforcing congruence for coefficient estimates of highly correlated variables rather than just selected one and dropping the others. In the model specification shown below, $\lambda$ is the tuning parameter that is usually optimized using cross-validation.
+
+$$
+\begin{aligned}
+&g(E[y]) = X\beta + \epsilon \; \text{(Linear classifier)} \\
+&arg \; \underset{\beta}{max}\; L(\beta; y, X) + \lambda_1||\beta||_1 \; \text{(Lasso)} \\
+&arg \; \underset{\beta}{max}\; L(\beta; y, X) + \lambda_1||\beta||_1 + \lambda_2 ||\beta||^2 \; \text{(Elastic net)}
+\end{aligned}
+$$
+
+### Phenotype-gene expression data
+
+Phenotype-gene expression studies provide a natural setting for the application of dimension reduction techniques and shrinkage models.[^5] Gene expression data can record continuous numbers of reads for thousands of unique DNA and RNA sequences from an individual. Often researchers are interested in relationships between the normalized genetic expression data and observed phenotypes, such as protein levels and disease states. Golub et al. utilized neighborhood analysis on 6817 genes to isolate 1100 genes with higher correlations to either acute lymphoblastic leukemia (ALL) or acute myeloid leukemia (AML) than expected by pure chance.[^6] The authors then further isolated 50 informative genes based again upon their correlation with the leukemia classes. Each gene was then given a weighted vote based upon expression level and correlation with the class distinction. A prediction strength was established a priori and the data was run through the model and summed to determine the predicted class. Leave-one-out cross-validation was used to assess the accuracy of the predictors. While the authors achieved 100 percent accuracy, the choice of 50 genes was arbitrary, and in fact predictors based on between 10 and 200 genes all had 100 percent accuracy. Such ad-hoc methods are beneficial for proof-of-concept, but more robust methods for model selection, such as dimension reduction and regularization methods are preferred.
+\pagebreak
+
+##Methods
+
+Partial least squares regression in combination with discriminant analysis (DA) was used to model the leukemia class of the individuals in the sample. The modeling objective is to collapse the gene expression data into orthogonal components in a way that preserves information between the latent factors as the response. The latent factors are then used as predictors in the DA classifier.
+
+### Partial least squares discriminant analysis 
+
+In comparison to PCR, partial least squares discriminant analysis (PLS-DA) seeks to maximize the covariance of latent factors and the response variable.[^7] PLS-DA produces X-scores and loadings, much like PCR, but also Y-scores and loadings that explain the given response space (assuming there is more than one response variable, if not then Y is just a column vector). The PLS-DA algorithm will pass information from the Y response space to the X predictor space by swapping the score blocks at each iteration of calculating the modified principal components.
+
+The resulting modified principal components are not orthogonal (although weights can be used to coerce them to be orthogonal) but are more strongly associated with variation in the response space and provide more accurate predictions .[^8] PLS-DA has several advantages over other methods. It is advantageous when the number of predictors is larger than the sample size and collinearity is high among the predictors. PLS-DA is also a robust prediction method  because it reduces out of sample variance of residual errors and noise in the data in comparison to common linear classification algorithms. It important to note that the design matrix should be normalized because the algorithm is sensitive to scale. In the equation below for a binary classifier, the $T_{n \times a}$ and $U_{n \times 2}$ matrices are the lower dimensional scores matrices for X and Y, respectively. The $P_{a \times p}$ and $Q_{a \times 2}$ matrices are each orthogonal loading matrices while the $E_{n \times p}$ and $F_{n \times p}$ are error terms.
+
+$$
+\begin{aligned}
+&X = TP^T + E \;\text{(X decomposition)}\\ 
+&Y = UQ^T + F\; \text{(Y decomposition)}\\
+&Y = TBQ^{T} + F\\
+&arg \; \underset{\beta}{min} ||Y - TBQ^{T}||
+\end{aligned}
+$$
+
+PLS-DA predicts unknown observations by multiplying the new matrix $X^{(new)}$ by the weighted loading matrices $P^*$ obtained from the trained model. $X^{(new)}$ is decomposed into the specified number of components and predictive scores values are calculated. The classification boundary is usually the closest group mean score. PLS-DA can be conceptualized as a penalized canonical correlation analysis, where the separation boundary is a function of the among-groups variability, where in comparison PCA discrimination can fail if within-group variation overwhelms among-group variation.[^9]  
+\pagebreak
+
+#Results
+
+## Model accuracy
+The 10-fold cross-validated PLS-DA model contained 33 lower dimensional components of the gene expression covariates. Twenty-one components appear adequate enough to explain much of the variation in the gene expression data (Figure 1). The model achieved 100 percent accuracy on the training set with two components and with three components on the test set (Figure 2). Additional, component predictors on the test set increases the error rate to 3 percent. Figures 2 and 3 highlights the separation of the feature space in relation to the leukemia class. Note that all numbers including and the left of 29 are AML classes while those to the right are all ALL classes. 
+
+```{r echo = FALSE}
+X_var = round(t((gene.cpls$Xvar/gene.cpls$Xtotvar)),2)
+plot(1:gene.cpls$ncomp, X_var,
+     type = "l",
+     lwd = 2,
+     col = "blue",
+     xlab = "Component",
+     ylab = "% Gene Expression Variance",
+     main = "Figure 1. Component Percentage of Gene Expression Variance")
+```
+
+```{r echo=FALSE, warning=FALSE}
+# Classification by PLS-DA for training and test data
+train_error = matrix(ncol = gene.cpls$ncomp, nrow = 1)
+test_error = matrix(ncol = gene.cpls$ncomp, nrow = 1)
+dimnames(train_error) = list(Model = c('CPLS'), ncomp = 1:gene.cpls$ncomp)
+dimnames(test_error) = list(Model = c('CPLS'), ncomp = 1:gene.cpls$ncomp)
+for (i in 1:gene.cpls$ncomp) {
+  train.pred = predict(gene.cpls, 
+                       newdata = train_df,
+                       ncomp = i,
+                       type = "response")
+  train.pred[abs(train.pred[,,] - mean(train_df$phenotype == 0)) <
+      abs(train.pred[,,] - mean(train_df$phenotype == 1))] = 1
+  train.pred[train.pred != 1] = 0      
+  
+  test.pred = predict(gene.cpls, 
+                       newdata = test_df,
+                       ncomp = i,
+                       type = "response")
+  test.pred[abs(test.pred[,,] - mean(train_df$phenotype == 0)) <
+      abs(test.pred[,,] - mean(train_df$phenotype == 1))] = 1
+  test.pred[test.pred != 1] = 0  
+
+  
+  train_error[1,i] = sum(train.pred[,,] != train_df$phenotype)/gene.cpls$ncomp
+  test_error[1,i] = sum(test.pred[,,] != test_df$phenotype)/gene.cpls$ncomp
+  
+}
+
+plot(1:gene.cpls$ncomp, train_error,
+     type ="o",
+     col = "blue",
+     lwd = 2,
+     xlab = "Number of Model Components",
+     ylab = "Classification Error Rate",
+     ylim = c(0,range(test_error)[2]),
+     main = "Figure 2. PLS-DA Classification Error")
+lines(1:gene.cpls$ncomp, test_error,
+     type ="o",
+     lwd = 2,
+     col ="green")
+legend("topright", legend = c("Training", "Test"),
+       lty = 1,
+       col = c("blue", "green"))
+```
+
+```{r echo=FALSE, warning=FALSE}
+train.color = rep(NA,nrow(train_df$phenotype))
+test.color = rep(NA,nrow(test_df$phenotype))
+                 
+for (i in 1:nrow(train_df$phenotype)){
+  if(train_df$phenotype[i] == 1){train.color[i] = "red"}
+  else {train.color[i] = "blue"}
+}
+
+for (i in 1:nrow(test_df$phenotype)){
+  if(test_df$phenotype[i] == 1){test.color[i] = "red"}
+  else {test.color[i] = "blue"}
+}
+
+
+scoreplot(gene.cpls, labels = seq(1,nrow(train_df)),
+          pch ="1",
+          col = train.color,
+          main = "Figure 3. Score Plot of Component 1 and 2 for Training Set")
+legend("bottomleft", legend = c("AML", "ALL"), col = c("red","blue"), lty = 1)
+scoreplot(predict(gene.cpls, newdata = test_df, type = "score"), labels = seq(1,nrow(test_df)),
+          pch ="1",
+          col = test.color,
+          main = "Figure 4. Score Plot of Component 1 and 2 for Test Set")
+legend("bottomright", legend = c("AML", "ALL"), col = c("red","blue"), lty = 1)
+```
+
+
+```{r echo=FALSE, warning=FALSE}
+ALL.top5 = tail(sort(gene.cpls$coefficients[,,3]),5)
+ALL.names = names(ALL.top5)
+ALL.desc = c("type III intermediate filament protein",
+             "hemoglobin subunit beta",
+             "hemoglobin subunit gamma-1",
+             "azurocidin",
+             "myeloperoxidase")
+
+AML.top5 = tail(sort(gene.cpls$coefficients[,,3], decreasing = TRUE),5)
+AML.names = names(AML.top5)
+AML.desc = c("GDP-dissociation inhibitor protein",
+             "thymosin beta-4",
+             "prothymosin alpha",
+             "orphan G protein-coupled receptor",
+             "class 1 major histocompatibility complex")
+
+ALL.table = data.frame("Description" = ALL.desc, "Coefficient" = ALL.top5)
+rownames(ALL.table) = ALL.names
+AML.table = data.frame("Description" = AML.desc, "Coefficient" = AML.top5)
+rownames(AML.table) = AML.names
+
+knitr::kable(ALL.table, caption = "Top 5 Genes Associated with ALL")
+knitr::kable(AML.table, caption = "Top 5 Genes Associated with AML")
+```
+
+\pagebreak
+
+## Influential Predictors
+Figure 4 is the transformed components to the original gene expression coefficients. It is clear that the overall effect sizes are small and most genes do not contribute to the predictive ability of the classifier. Tables 1 and 2 display the top five genes with the largest coefficients associated with ALL and AML. We observe that gene "M19507_at", which encodes for myeloperoxidase, with the largest coefficient associated with ALL. In contrast, gene "D49824_s_at", which encodes for a serotype of class 1 major histocompatibility complex (MHC) molecules, had the largest association with AML. Only the gene that codes for Azurocidin was cross-listed with the 50 genes that Golub et al. isolated.
+
+```{r echo=FALSE, warning=FALSE}
+coefplot(gene.cpls, main = "Figure 5. PLS-DA Component Coefficients",
+         xlab = "Gene")
+```
+
+#Discussion
+In comparison to the Golub et al. approach, PLS-DA was able to achieve similar levels of accuracy with a substantially smaller amount of predictors selected in a rigorous fashion. This approach also allows us to work backwards to determine the predictive power of all genes on the response rather than removing them from the model. However, PLS-DA requires cross-validation or out-of-sample testing to determine the optimal number of components to use for out-of-sample testing.
+
+The nonexistence of a unique solution when the number of predictors is larger than the sample size of the data is a challenging problem for linear classifiers, especially when multicollinearity and missing data are also issues. Other methods that seek to reduce the dimensions of the predictors, such as principal component analysis (PCR), allow for noise reduction and solve the collinearity problem. However, useful information for accurate prediction can be lost because PCR explains the useful directional information in the predictor space, which may not be sufficiently linked to the space of the new observed responses. PLS-DA in this paper has been shown to produce equally accurate parsimonious gene expression models for predicting cancer phenotype while allowing for a full model of the gene expression parameter space.
+
+[^1]: Wehrens, Ron, and B-H. Mevik. "The pls package: principal component and partial least squares regression in R." (2007).
+
+[^2]: Tibshirani, Robert. "Regression shrinkage and selection via the lasso." Journal of the Royal Statistical Society. Series B (Methodological) (1996): 267-288.
+
+[^3]: Tibshirani, R. J. (2013). The lasso problem and uniqueness. Electronic Journal of Statistics, 7, 1456-1490.
+
+[^4]: Zou, H., & Hastie, T. (2005). Regularization and variable selection via the elastic net. Journal of the Royal Statistical Society: Series B (Statistical Methodology), 67(2), 301-320.
+
+[^5]: Pérez-Enciso, M., & Tenenhaus, M. (2003). Prediction of clinical outcome with microarray data: a partial least squares discriminant analysis (PLS-DA) approach. Human genetics, 112(5-6), 581-592.
+
+[^6]: Golub, Todd R., et al. "Molecular classification of cancer: class discovery and class prediction by gene expression monitoring." science 286.5439 (1999): 531-537.
+
+[^7]: Liland, Kristian Hovde, and Ulf Geir Indahl. "Powered partial least squares discriminant analysis." Journal of Chemometrics23.1 (2009): 7-18.
+
+[^8]: Kemsley, E. K. (1996). Discriminant analysis of high-dimensional data: a comparison of principal components analysis and partial least squares data reduction methods. Chemometrics and intelligent laboratory systems, 33(1), 47-61.
+
+[^9]: Barker, M., & Rayens, W. (2003). Partial least squares for discrimination. Journal of Chemometrics: A Journal of the Chemometrics Society, 17(3), 166-173.
